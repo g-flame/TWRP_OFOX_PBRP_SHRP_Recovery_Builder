@@ -1,0 +1,185 @@
+name: TWRP Builder - Marino
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths-ignore:
+      - '**.md'
+      - '**.txt'
+  pull_request:
+    branches: [ "main" ]
+    paths-ignore:
+      - '**.md'
+      - '**.txt'
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-docker-images: 'true'
+
+      - name: Set Build Date
+        run: |
+          echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+          echo "VERSION=$(date +%Y%m%d_%H%M)" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          check-latest: true
+          cache: 'pip'
+
+      - name: Install Python 2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python2 python-is-python2
+
+      - name: Cache Build Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            ~/twrp_marino/.repo
+            ~/twrp_marino/out/host
+            ~/twrp_marino/prebuilts/gcc
+            ~/twrp_marino/prebuilts/build-tools
+          key: ${{ runner.os }}-twrp-${{ hashFiles('**/BoardConfig.mk') }}
+          restore-keys: |
+            ${{ runner.os }}-twrp-
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl \
+          zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 libncurses5 \
+          lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev \
+          libxml2-utils xsltproc unzip fontconfig ccache
+
+      - name: Initialize Repo Tool
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          git config --global user.name "$(git log -1 --pretty=format:'%an')"
+          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
+          echo "${HOME}/bin" >> $GITHUB_PATH
+
+      - name: Initialize TWRP Source
+        run: |
+          mkdir -p ~/twrp_marino
+          cd ~/twrp_marino
+          repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-8.1 --depth=1
+
+      - name: Sync Source Code
+        run: |
+          cd ~/twrp_marino
+          repo sync -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
+
+      - name: Clone Device Tree
+        run: |
+          cd ~/twrp_marino
+          git clone https://github.com/Maanush2004/android_device_lenovo_marino device/lenovo/marino
+          echo "COMMIT_ID=$(git -C device/lenovo/marino rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Setup ccache
+        run: |
+          cd ~/twrp_marino
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          export CCACHE_DIR=~/.ccache
+          ccache -M 20G
+          ccache -o compression=true
+          ccache -z
+
+      - name: Build TWRP
+        run: |
+          cd ~/twrp_marino
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export TW_DEFAULT_LANGUAGE="en"
+          export LC_ALL="C"
+          lunch omni_marino-eng
+          mka recoveryimage -j$(nproc --all)
+
+      - name: Check ccache stats
+        run: |
+          ccache -s
+
+      - name: Upload Recovery Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWRP-${{ env.VERSION }}-marino
+          path: |
+            ~/twrp_marino/out/target/product/marino/recovery.img
+            ~/twrp_marino/out/target/product/marino/recovery.tar
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name != 'pull_request'
+        with:
+          files: |
+            ~/twrp_marino/out/target/product/marino/recovery.img
+          name: TWRP-${{ env.VERSION }}-marino
+          tag_name: ${{ env.VERSION }}
+          body: |
+            TWRP Recovery for Lenovo Marino
+            Built on: ${{ env.BUILD_DATE }}
+            Commit: ${{ env.COMMIT_ID }}
+            
+            **Device Information:**
+            - Device: Lenovo Marino
+            - Architecture: arm64
+            - Android Version: 8.1
+            
+            **Notes:**
+            - Based on TWRP 8.1
+            - Built from latest source
+            
+            **SHA256:**
+            ```
+            ${{ hashFiles('~/twrp_marino/out/target/product/marino/recovery.img') }}
+            ```
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            MESSAGE="✅ TWRP Build Successful!%0A"
+          else
+            MESSAGE="❌ TWRP Build Failed!%0A"
+          fi
+          MESSAGE+="Device: Lenovo Marino%0A"
+          MESSAGE+="Date: ${{ env.BUILD_DATE }}%0A"
+          MESSAGE+="Version: ${{ env.VERSION }}%0A"
+          [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && \
+          curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage \
+          -d chat_id=${TELEGRAM_CHAT_ID} \
+          -d text="$MESSAGE" \
+          -d parse_mode=HTML
