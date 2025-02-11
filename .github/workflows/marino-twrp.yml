@@ -1,3 +1,4 @@
+
 name: TWRP Builder - Marino
 
 on:
@@ -39,13 +40,6 @@ jobs:
         run: |
           echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
           echo "VERSION=$(date +%Y%m%d_%H%M)" >> $GITHUB_ENV
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-          check-latest: true
-          cache: 'pip'
 
       - name: Install Python 2
         run: |
@@ -154,11 +148,6 @@ jobs:
             **Notes:**
             - Based on TWRP 8.1
             - Built from latest source
-            
-            **SHA256:**
-            ```
-            ${{ hashFiles('~/twrp_marino/out/target/product/marino/recovery.img') }}
-            ```
           draft: false
           prerelease: false
         env:
